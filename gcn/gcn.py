@@ -68,6 +68,8 @@ def main():
     
     for seed in range(args.num_runs):
         
+        print('===== seed ' + str(seed))
+        
         np.random.seed(seed)
         torch.manual_seed(seed)
         if torch.cuda.is_available():
