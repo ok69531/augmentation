@@ -3,6 +3,7 @@ import numpy as np
 from sklearn.metrics import roc_auc_score
 from module.influence import compute_loo_if
 
+
 def sigmoid(z):
     return 1/(1 + np.exp(-z))
 
@@ -29,7 +30,112 @@ def train(model, device, loader, criterion, optimizer):
         optimizer.step()
 
 
-def adv_train(model, 
+def flag_train(model, 
+               device, 
+               loader, 
+               criterion, 
+               optimizer, 
+               step_size=0.001, 
+               max_pert=0.01, 
+               m=3):
+    model.train()
+
+    for step, batch in enumerate(loader):
+        batch = batch.to(device)
+        
+        node_embedding = model.gnn(batch.x, batch.edge_index, batch.edge_attr)
+        perturb = torch.FloatTensor(node_embedding.shape[0], node_embedding.shape[1]).uniform_(-max_pert, max_pert).to(device)
+        perturb.requires_grad_()
+        
+        graph_embedding = model.pool(node_embedding + perturb, batch.batch)
+        pred = model.graph_pred_linear(graph_embedding)
+
+        y = batch.y.view(pred.shape).to(torch.float64)
+
+        is_valid = y**2 > 0
+        loss_mat = criterion(pred.double(), (y+1)/2)
+        loss_mat = torch.where(is_valid, loss_mat, torch.zeros(loss_mat.shape).to(loss_mat.device).to(loss_mat.dtype))
+
+        optimizer.zero_grad()
+        loss = torch.sum(loss_mat)/torch.sum(is_valid)
+        loss /= m
+        
+        for _ in range(m - 1):
+            loss.backward()
+            perturb_data = perturb.detach() + step_size * torch.sign(perturb.grad.detach())
+            perturb.data = perturb_data.data
+            perturb.grad[:] = 0
+            
+            tmp_node_embedding = model.gnn(batch.x, batch.edge_index, batch.edge_attr)
+            tmp_graph_embedding = model.pool(tmp_node_embedding + perturb, batch.batch)
+            tmp_pred = model.graph_pred_linear(tmp_graph_embedding)
+
+            loss = 0
+            loss_mat = criterion(tmp_pred.double(), (y+1)/2)
+            loss += torch.where(is_valid, loss_mat, torch.zeros(loss_mat.shape).to(loss_mat.device).to(loss_mat.dtype))
+            loss = torch.sum(loss_mat)/torch.sum(is_valid)
+            loss /= m
+
+        optimizer.zero_grad()
+        loss.backward()
+
+        optimizer.step()
+
+
+def aa_train(model, 
+             device, 
+             loader, 
+             criterion,
+             optimizer, 
+             step_size=0.001, 
+             max_pert=0.01, 
+             m=3):
+    model.train()
+
+    for step, batch in enumerate(loader):
+        batch = batch.to(device)
+        
+        perturb = torch.FloatTensor(batch.id.shape[0], 300).uniform_(-max_pert, max_pert).to(device)
+        perturb.requires_grad_()
+        
+        graph_embedding = model.pool(model.gnn(batch.x, batch.edge_index, batch.edge_attr), batch.batch)
+        pred = model.graph_pred_linear(graph_embedding + perturb)
+
+        y = batch.y.view(pred.shape).to(torch.float64)
+
+        #Whether y is non-null or not.
+        is_valid = y**2 > 0
+        #Loss matrix
+        loss_mat = criterion(pred.double(), (y+1)/2)
+        #loss matrix after removing null target
+        loss_mat = torch.where(is_valid, loss_mat, torch.zeros(loss_mat.shape).to(loss_mat.device).to(loss_mat.dtype))
+
+        optimizer.zero_grad()
+        loss = torch.sum(loss_mat)/torch.sum(is_valid)
+        loss /= m
+        
+        for _ in range(m - 1):
+            loss.backward()
+            perturb_data = perturb.detach() + step_size * torch.sign(perturb.grad.detach())
+            perturb.data = perturb_data.data
+            perturb.grad[:] = 0
+            
+            tmp_graph_embedding = model.pool(model.gnn(batch.x, batch.edge_index, batch.edge_attr), batch.batch)
+            tmp_pred = model.graph_pred_linear(tmp_graph_embedding + perturb)
+
+            loss = 0
+            loss_mat = criterion(tmp_pred.double(), (y+1)/2)
+            loss += torch.where(is_valid, loss_mat, torch.zeros(loss_mat.shape).to(loss_mat.device).to(loss_mat.dtype))
+            loss = torch.sum(loss_mat)/torch.sum(is_valid)
+            loss /= m
+
+        optimizer.zero_grad()
+        loss.backward()
+
+        optimizer.step()
+
+
+def saa_train(model, 
               device, 
               loader, 
               criterion, 
