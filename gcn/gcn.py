@@ -74,7 +74,7 @@ def main():
             torch.cuda.manual_seed_all(seed)
         
         if args.split == 'scaffold':
-            train_dataset, valid_datset, test_dataset = scaffold_split(dataset, smiles_list, null_value=0, frac_train=0.8, frac_valid=0.1, frac_test=0.1)
+            train_dataset, valid_dataset, test_dataset = scaffold_split(dataset, smiles_list, null_value=0, frac_train=0.8, frac_valid=0.1, frac_test=0.1)
             print('scaffold')
         elif args.split == 'random_scaffold':
             train_dataset, valid_dataset, test_dataset = random_scaffold_split(dataset, smiles_list, null_value=0, frac_train=0.8, frac_valid=0.1, frac_test=0.1, seed=seed)
@@ -122,7 +122,7 @@ def main():
     
         test_auc_list.append(max(test_auc_per_epoch))
     
-    result = pd.DataFrame(('auc': test_auc_list))
+    result = pd.DataFrame({'auc': test_auc_list})
     print(result.auc.mean(), result.auc.sem())
 
 
