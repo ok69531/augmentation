@@ -146,6 +146,7 @@ def saa_train(model,
               loader, 
               criterion, 
               optimizer, 
+              emb_dim = 300,
               ratio: float = 0.3, 
               step_size: float = 0.001, 
               max_pert: float = 0.01, 
@@ -157,7 +158,7 @@ def saa_train(model,
         
         k = round(len(batch.id) * ratio)
         
-        perturb = torch.FloatTensor(k, 300).uniform_(-max_pert, max_pert).to(device)
+        perturb = torch.FloatTensor(k, emb_dim).uniform_(-max_pert, max_pert).to(device)
         perturb.requires_grad_()
         
         graph_embedding = model.pool(model.gnn(batch.x, batch.edge_index, batch.edge_attr), batch.batch)
@@ -208,7 +209,8 @@ def saa_train(model,
 
 
 
-def lbfgs_train(model, device, loader, criterion, optimizer, dataset, ratio=0.3, step_size=0.001, max_pert=0.01, m=3, history=2):
+def lbfgs_train(model, device, loader, criterion, optimizer, dataset, 
+                emb_dim = 300, ratio=0.3, step_size=0.001, max_pert=0.01, m=3, history=2):
     model.train()
 
     for step, batch in enumerate(loader):
@@ -245,7 +247,7 @@ def lbfgs_train(model, device, loader, criterion, optimizer, dataset, ratio=0.3,
         
         k = round(len(batch.id) * ratio)
         
-        perturb = torch.FloatTensor(k, 100).uniform_(-max_pert, max_pert).to(device)
+        perturb = torch.FloatTensor(k, emb_dim).uniform_(-max_pert, max_pert).to(device)
         perturb.requires_grad_()
         
         graph_embedding = model.pool(model.gnn(batch.x, batch.edge_index, batch.edge_attr), batch.batch)
