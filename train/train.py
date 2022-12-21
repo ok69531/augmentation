@@ -1,12 +1,15 @@
+import sys
+sys.path.append('../')
+
 import torch
 import numpy as np
 from sklearn.metrics import roc_auc_score
-from module.influence import compute_loo_if
+from module.hvp_influence import hvp_loo_if
 from module.lbfgs_influence import (
     compute_grad,
     flat_model_weight,
     flat_grad,
-    compute_loo_if
+    lbfgs_loo_if
 )
 
 
@@ -15,6 +18,7 @@ def sigmoid(z):
 
 
 def train(model, device, loader, criterion, optimizer):
+    
     model.train()
 
     for step, batch in enumerate(loader):
@@ -41,9 +45,10 @@ def flag_train(model,
                loader, 
                criterion, 
                optimizer, 
-               step_size=0.001, 
-               max_pert=0.01, 
-               m=3):
+               step_size: float = 0.001, 
+               max_pert: float = 0.01, 
+               m: int = 3):
+    
     model.train()
 
     for step, batch in enumerate(loader):
@@ -93,15 +98,17 @@ def aa_train(model,
              loader, 
              criterion,
              optimizer, 
-             step_size=0.001, 
-             max_pert=0.01, 
-             m=3):
+             emb_dim = 300,
+             step_size: float = 0.001, 
+             max_pert: float = 0.01, 
+             m: int = 3):
+    
     model.train()
 
     for step, batch in enumerate(loader):
         batch = batch.to(device)
         
-        perturb = torch.FloatTensor(batch.id.shape[0], 300).uniform_(-max_pert, max_pert).to(device)
+        perturb = torch.FloatTensor(batch.id.shape[0], emb_dim).uniform_(-max_pert, max_pert).to(device)
         perturb.requires_grad_()
         
         graph_embedding = model.pool(model.gnn(batch.x, batch.edge_index, batch.edge_attr), batch.batch)
@@ -141,16 +148,21 @@ def aa_train(model,
         optimizer.step()
 
 
-def saa_train(model, 
-              device, 
-              loader, 
-              criterion, 
-              optimizer, 
-              emb_dim = 300,
-              ratio: float = 0.3, 
-              step_size: float = 0.001, 
-              max_pert: float = 0.01, 
-              m: int = 3):
+def lin_saa_train(model, 
+                  device, 
+                  loader, 
+                  criterion, 
+                  optimizer, 
+                  dataset,
+                  emb_dim = 300,
+                  ratio: float = 0.3, 
+                  step_size: float = 0.001, 
+                  max_pert: float = 0.01, 
+                  m: int = 3,
+                  damping: float = 0.01,
+                  recursion_depth: int = 10,
+                  tol: float = 1e-6):
+    
     model.train()
 
     for step, batch in enumerate(loader):
@@ -162,21 +174,16 @@ def saa_train(model,
         perturb.requires_grad_()
         
         graph_embedding = model.pool(model.gnn(batch.x, batch.edge_index, batch.edge_attr), batch.batch)
-        loo_influence = compute_loo_if(model.graph_pred_linear, graph_embedding, batch.y, criterion)
+        loo_influence = hvp_loo_if(model.graph_pred_linear, device, criterion, dataset, batch, damping, recursion_depth, tol)
         _, topk_idx = torch.topk(loo_influence, k = k, axis = -1)
         
         graph_embedding = graph_embedding[topk_idx, :] + perturb
-        # topk_embedding = graph_embedding[topk_idx, :] + perturb
         pred = model.graph_pred_linear(graph_embedding)
-        # pred = model.graph_pred_linear(topk_embedding)
 
         y = batch.y.view([len(batch.id), 1]).to(torch.float64)[topk_idx, :]
 
-        #Whether y is non-null or not.
         is_valid = y**2 > 0
-        #Loss matrix
         loss_mat = criterion(pred.double(), (y+1)/2)
-        #loss matrix after removing null target
         loss_mat = torch.where(is_valid, loss_mat, torch.zeros(loss_mat.shape).to(loss_mat.device).to(loss_mat.dtype))
 
         optimizer.zero_grad()
@@ -191,10 +198,73 @@ def saa_train(model,
             
             tmp_graph_embedding = model.pool(model.gnn(batch.x, batch.edge_index, batch.edge_attr), batch.batch)
             tmp_graph_embedding = tmp_graph_embedding[topk_idx, :] + perturb
-            # tmp_topk_embedding = tmp_graph_embedding[topk_idx, :] + perturb
             
             tmp_pred = model.graph_pred_linear(tmp_graph_embedding)
-            # tmp_pred = model.graph_pred_linear(tmp_topk_embedding)
+
+            loss = 0
+            loss_mat = criterion(tmp_pred.double(), (y+1)/2)
+            loss += torch.where(is_valid, loss_mat, torch.zeros(loss_mat.shape).to(loss_mat.device).to(loss_mat.dtype))
+            loss = torch.sum(loss_mat)/torch.sum(is_valid)
+            loss /= m
+
+        optimizer.zero_grad()
+        loss.backward()
+
+        optimizer.step()
+
+
+def all_saa_train(model, 
+                  device, 
+                  loader, 
+                  criterion, 
+                  optimizer, 
+                  dataset,
+                  emb_dim = 300,
+                  ratio: float = 0.3, 
+                  step_size: float = 0.001, 
+                  max_pert: float = 0.01, 
+                  m: int = 3,
+                  damping: float = 0.01,
+                  recursion_depth: int = 10,
+                  tol: float = 1e-6):
+    
+    model.train()
+
+    for step, batch in enumerate(loader):
+        batch = batch.to(device)
+        
+        k = round(len(batch.id) * ratio)
+        
+        perturb = torch.FloatTensor(k, emb_dim).uniform_(-max_pert, max_pert).to(device)
+        perturb.requires_grad_()
+        
+        graph_embedding = model.pool(model.gnn(batch.x, batch.edge_index, batch.edge_attr), batch.batch)
+        loo_influence = hvp_loo_if(model, device, criterion, dataset, batch, damping, recursion_depth, tol)
+        _, topk_idx = torch.topk(loo_influence, k = k, axis = -1)
+        
+        graph_embedding = graph_embedding[topk_idx, :] + perturb
+        pred = model.graph_pred_linear(graph_embedding)
+
+        y = batch.y.view([len(batch.id), 1]).to(torch.float64)[topk_idx, :]
+
+        is_valid = y**2 > 0
+        loss_mat = criterion(pred.double(), (y+1)/2)
+        loss_mat = torch.where(is_valid, loss_mat, torch.zeros(loss_mat.shape).to(loss_mat.device).to(loss_mat.dtype))
+
+        optimizer.zero_grad()
+        loss = torch.sum(loss_mat)/torch.sum(is_valid)
+        loss /= m
+        
+        for _ in range(m - 1):
+            loss.backward()
+            perturb_data = perturb.detach() + step_size * torch.sign(perturb.grad.detach())
+            perturb.data = perturb_data.data
+            perturb.grad[:] = 0
+            
+            tmp_graph_embedding = model.pool(model.gnn(batch.x, batch.edge_index, batch.edge_attr), batch.batch)
+            tmp_graph_embedding = tmp_graph_embedding[topk_idx, :] + perturb
+            
+            tmp_pred = model.graph_pred_linear(tmp_graph_embedding)
 
             loss = 0
             loss_mat = criterion(tmp_pred.double(), (y+1)/2)
@@ -209,8 +279,19 @@ def saa_train(model,
 
 
 
-def lbfgs_train(model, device, loader, criterion, optimizer, dataset, 
-                emb_dim = 300, ratio=0.3, step_size=0.001, max_pert=0.01, m=3, history=2):
+def lbfgs_train(model, 
+                device, 
+                loader, 
+                criterion, 
+                optimizer, 
+                dataset, 
+                emb_dim: int = 300, 
+                ratio: float = 0.3, 
+                step_size: float = 0.001, 
+                max_pert: float = 0.01, 
+                m: int = 3, 
+                history: int = 2):
+    
     model.train()
 
     for step, batch in enumerate(loader):
@@ -251,7 +332,7 @@ def lbfgs_train(model, device, loader, criterion, optimizer, dataset,
         perturb.requires_grad_()
         
         graph_embedding = model.pool(model.gnn(batch.x, batch.edge_index, batch.edge_attr), batch.batch)
-        loo_influence = compute_loo_if(key_list, gradient_dict, weight_dict)
+        loo_influence = lbfgs_loo_if(key_list, gradient_dict, weight_dict)
         _, topk_idx = torch.topk(loo_influence, k = k, axis = -1)
         
         graph_embedding = graph_embedding[topk_idx, :] + perturb
@@ -275,10 +356,8 @@ def lbfgs_train(model, device, loader, criterion, optimizer, dataset,
             
             tmp_graph_embedding = model.pool(model.gnn(batch.x, batch.edge_index, batch.edge_attr), batch.batch)
             tmp_graph_embedding = tmp_graph_embedding[topk_idx, :] + perturb
-            # tmp_topk_embedding = tmp_graph_embedding[topk_idx, :] + perturb
             
             tmp_pred = model.graph_pred_linear(tmp_graph_embedding)
-            # tmp_pred = model.graph_pred_linear(tmp_topk_embedding)
 
             loss = 0
             loss_mat = criterion(tmp_pred.double(), (y+1)/2)
@@ -319,7 +398,7 @@ def eval(model, device, loader, criterion):
     loss.append(_loss)
     y_true = torch.cat(y_true, dim = 0).data.cpu().numpy()
     y_score = torch.cat(y_score, dim = 0).data.cpu().numpy()
-    y_pred = np.where(sigmoid(y_score) > 0.5, 1.0, 0.0)
+    # y_pred = np.where(sigmoid(y_score) > 0.5, 1.0, 0.0)
     
     auc_list = []
     
