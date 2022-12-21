@@ -113,10 +113,10 @@ def main():
         
         for epoch in range(1, args.epochs + 1):
             print('=== epoch ' + str(epoch))
-            lin_saa_train(model, device, train_loader, criterion, optimizer, dataset,
+            lin_saa_train(model, device, train_loader, criterion, optimizer,
                           emb_dim = args.emb_dim, ratio = args.ratio, step_size = args.step_size, max_pert = args.max_pert,
                           m = args.m, damping = args.damping, recursion_depth = args.recursion_depth, tol = args.tol)
-                  
+            
             if args.eval_train:
                 train_loss, train_auc = eval(model, device, train_loader, criterion)
             else:
