@@ -1,220 +1,141 @@
 import sys
 sys.path.append('../')
 
-import os
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-
-import numpy as np
-import pandas as pd
-
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.nn.utils import _stateless
-
 import torch.optim as optim
 from torch_geometric.loader import DataLoader
 
-from sklearn.metrics import roc_auc_score
+import argparse
+import numpy as np
+import pandas as pd
 
 from model.model import GNN_graphpred
-from module.last_layer_influence import compute_loo_if
-from module.common import MoleculeDataset, random_scaffold_split, scaffold_split
+from train.train import sigmoid, lin_saa_train, eval
+from module.common import MoleculeDataset, scaffold_split, random_scaffold_split
 
 
-device = torch.device('cuda:0') if torch.cuda.is_available() else 'cpu'
+criterion = nn.BCEWithLogitsLoss(reduction = "none")
 
-num_layer = 2
-embedding_dim = 5
-num_worker = 0
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--batch_size', type = int, default = 500, help = 'batch size for training (default = 500)')
+    parser.add_argument('--epochs', type = int, default = 50, help = 'number of epochs to train (default = 50)')
+    parser.add_argument('--lr', type = float, default = 0.001, help = 'learning rate (default = 0.001)')
+    parser.add_argument('--lr_scale', type = float, default = 1, help = 'relative learning rate for the feature extraction layer (default = 1)')
+    parser.add_argument('--decay', type = float, default = 0, help = 'weight decay (default = 0)')
+    parser.add_argument('--num_layer', type = int, default = 3, help = 'number of GNN message passing layers (default = 3)')
+    parser.add_argument('--emb_dim', type = int, default = 300, help = 'embedding dimensions (default = 300)')
+    parser.add_argument('--dropout_ratio', type = float, default = 0, help = 'dropout ratio (default = 0)')
+    parser.add_argument('--graph_pooling', type = str, default = 'mean', help = 'graph level pooling (sum, mean, max)')
+    parser.add_argument('--JK', type = str, default = 'last', help = 'how the node features across layers are combined. (last, sum, max or concat)')
+    parser.add_argument('--gnn_type', type = str, default = 'gcn')
+    parser.add_argument('--ratio', type = float, default = 0.2, help = 'top k IF-LOO ratio (default = 0.2)')
+    parser.add_argument('--max_pert', type = float, default = 0.01, help = 'perturbation budget (default = 0.01)')
+    parser.add_argument('--step_size', type = float, default = 0.001, help = 'gradient ascent learning rate (default = 0.001)')
+    parser.add_argument('--m', type = int, default = 3, help = 'number of update for perturbation (default = 3)')
+    parser.add_argument('--damping', type = float, default = 0.01, help = 'learning rate for update inverse hvp')
+    parser.add_argument('--recursion_depth', type = int, default = 10, help = 'number of inverse hvp interations')
+    parser.add_argument('--tol', type = float, default = 1e-6)
+    parser.add_argument('--dataset', type = str, default = 'hiv', help = 'bace, bbbp, clintox, hiv, muv, sider, tox21, toxcast')
+    parser.add_argument('--split', type = str, default = 'random_scaffold', help = 'scaffold or random_scaffold')
+    parser.add_argument('--eval_train', type = int, default = 1, help = 'evaluating training or not')
+    parser.add_argument('--num_workers', type = int, default = 4, help = 'number of workers for dataset loading')
+    parser.add_argument('--num_runs', type = int, default = 3, help = 'number of independent runs (default = 3)')
+    try:
+        args = parser.parse_args()
+    except:
+        args = parser.parse_args([])
+    
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu') 
 
-DATASET_NAME = "hiv"
-if DATASET_NAME == "tox21":
-    NUM_TASK = 12
-elif DATASET_NAME == "hiv":
-    NUM_TASK = 1
-elif DATASET_NAME == "pcba":
-    NUM_TASK = 128
-elif DATASET_NAME == "muv":
-    NUM_TASK = 17
-elif DATASET_NAME == "bace":
-    NUM_TASK = 1
-elif DATASET_NAME == "bbbp":
-    NUM_TASK = 1
-elif DATASET_NAME == "toxcast":
-    NUM_TASK = 617
-elif DATASET_NAME == "sider":
-    NUM_TASK = 27
-elif DATASET_NAME == "clintox":
-    NUM_TASK = 2
-elif DATASET_NAME == 'geno':
-    NUM_TASK = 1
+    if args.dataset == "tox21":
+        num_task = 12
+    elif args.dataset == "hiv":
+        num_task = 1
+    elif args.dataset == "pcba":
+        num_task = 128
+    elif args.dataset == "muv":
+        num_task = 17
+    elif args.dataset == "bace":
+        num_task = 1
+    elif args.dataset == "bbbp":
+        num_task = 1
+    elif args.dataset == "toxcast":
+        num_task = 617
+    elif args.dataset == "sider":
+        num_task = 27
+    elif args.dataset == "clintox":
+        num_task = 2
 
-dataset = MoleculeDataset('../dataset/' + DATASET_NAME, dataset = DATASET_NAME)
-smiles_list = pd.read_csv('../dataset/' + DATASET_NAME + '/processed/smiles.csv', header = None)[0].tolist()
-
-
-def sigmoid(z):
-    return 1/(1 + np.exp(-z))
-
-
-def train(model, loader, optimizer, ratio = 0.4, step_size=0.001, max_pert=0.01, m=3):
-    model.train()
-
-    for step, batch in enumerate(loader):
-        batch = batch.to(device)
+    dataset = MoleculeDataset('../dataset/' + args.dataset, dataset = args.dataset)
+    smiles_list = pd.read_csv('../dataset/' + args.dataset + '/processed/smiles.csv', header = None)[0].tolist()
+    
+    test_auc_list = []
+    
+    for seed in range(args.num_runs):
         
-        k = round(len(batch.id) * ratio)
+        print('===== seed ' + str(seed))
         
-        perturb = torch.FloatTensor(k, embedding_dim).uniform_(-max_pert, max_pert).to(device)
-        perturb.requires_grad_()
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
         
-        graph_embedding = model.pool(model.gnn(batch.x, batch.edge_index, batch.edge_attr), batch.batch)
-        loo_influence = compute_loo_if(model.graph_pred_linear, graph_embedding, batch.y, criterion)
-        _, topk_idx = torch.topk(loo_influence, k = k, axis = -1)
+        if args.split == 'scaffold':
+            train_dataset, valid_dataset, test_dataset = scaffold_split(dataset, smiles_list, null_value=0, frac_train=0.8, frac_valid=0.1, frac_test=0.1)
+            print('scaffold')
+        elif args.split == 'random_scaffold':
+            train_dataset, valid_dataset, test_dataset = random_scaffold_split(dataset, smiles_list, null_value=0, frac_train=0.8, frac_valid=0.1, frac_test=0.1, seed=seed)
+            print('random scaffold')
+        else:
+            raise ValueError('Invalid split option')
         
-        graph_embedding = graph_embedding[topk_idx, :] + perturb
-        pred = model.graph_pred_linear(graph_embedding)
-
-        y = batch.y.view([len(batch.id), 1]).to(torch.float64)[topk_idx, :]
-
-        is_valid = y**2 > 0
-        loss_mat = criterion(pred.double(), (y+1)/2)
-        loss_mat = torch.where(is_valid, loss_mat, torch.zeros(loss_mat.shape).to(loss_mat.device).to(loss_mat.dtype))
-
-        optimizer.zero_grad()
-        loss = torch.sum(loss_mat)/torch.sum(is_valid)
-        loss /= m
+        train_loader = DataLoader(train_dataset, batch_size = args.batch_size, shuffle = True, num_workers = args.num_workers)
+        val_loader = DataLoader(valid_dataset, batch_size = args.batch_size, shuffle = False, num_workers = args.num_workers)
+        test_loader = DataLoader(test_dataset, batch_size = args.batch_size, shuffle = False, num_workers = args.num_workers)
         
-        for _ in range(m - 1):
-            loss.backward()
-            perturb_data = perturb.detach() + step_size * torch.sign(perturb.grad.detach())
-            perturb.data = perturb_data.data
-            perturb.grad[:] = 0
+        model = GNN_graphpred(args.num_layer, args.emb_dim, num_task, 
+                              JK = args.JK, 
+                              drop_ratio = args.dropout_ratio, 
+                              graph_pooling = args.graph_pooling, 
+                              gnn_type = args.gnn_type)
+        model.to(device)
+        
+        model_param_group = []
+        model_param_group.append({'params': model.gnn.parameters()})
+        if args.graph_pooling == 'attention':
+            model_param_group.append({'params': model.pool.parameters(), 'lr': args.lr * args.lr_scale})
+        model_param_group.append({'params': model.graph_pred_linear.parameters(), 'lr': args.lr * args.lr_scale})
+        optimizer = optim.Adam(model_param_group, lr = args.lr, weight_decay = args.decay)
+        
+        test_auc_per_epoch = []
+        
+        for epoch in range(1, args.epochs + 1):
+            print('=== epoch ' + str(epoch))
+            lin_saa_train(model, device, train_loader, criterion, optimizer, dataset,
+                          emb_dim = args.emb_dim, ratio = args.ratio, step_size = args.step_size, max_pert = args.max_pert,
+                          m = args.m, damping = args.damping, recursion_depth = args.recursion_depth, tol = args.tol)
+                  
+            if args.eval_train:
+                train_loss, train_auc = eval(model, device, train_loader, criterion)
+            else:
+                print('omit the training accuracy computation')
+                train_auc = 0
             
-            tmp_graph_embedding = model.pool(model.gnn(batch.x, batch.edge_index, batch.edge_attr), batch.batch)
-            tmp_graph_embedding = tmp_graph_embedding[topk_idx, :] + perturb
+            val_loss, val_auc = eval(model, device, val_loader, criterion)
+            test_loss, test_auc = eval(model, device, test_loader, criterion)
             
-            tmp_pred = model.graph_pred_linear(tmp_graph_embedding)
-
-            loss = 0
-            loss_mat = criterion(tmp_pred.double(), (y+1)/2)
-            loss += torch.where(is_valid, loss_mat, torch.zeros(loss_mat.shape).to(loss_mat.device).to(loss_mat.dtype))
-            loss = torch.sum(loss_mat)/torch.sum(is_valid)
-            loss /= m
-
-        optimizer.zero_grad()
-        loss.backward()
-
-        optimizer.step()
-
-
-@torch.no_grad()
-def eval(model, device, loader):
-    model.eval()
+            test_auc_per_epoch.append(test_auc)
+            
+            print("train_loss: %f val_loss: %f test_loss: %f" %(train_loss, val_loss, test_loss),
+                  "\ntrain_auc: %f val_auc: %f test_auc: %f" %(train_auc, val_auc, test_auc))
     
-    y_true = []
-    y_score = []
-    loss = []
-
-    for step, batch in enumerate(loader):
-        batch = batch.to(device)
-        
-        pred = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
-        y = batch.y.view(pred.shape).to(torch.float64)
-
-        is_valid = y**2 > 0
-        loss_mat = criterion(pred.double(), (y+1)/2)
-        loss_mat = torch.where(is_valid, loss_mat, torch.zeros(loss_mat.shape).to(loss_mat.device).to(loss_mat.dtype))
-
-        _loss = torch.sum(loss_mat)/torch.sum(is_valid)
-
-        y_true.append(batch.y.view(pred.shape))
-        y_score.append(pred)
+        test_auc_list.append(max(test_auc_per_epoch))
     
-    loss.append(_loss)
-    y_true = torch.cat(y_true, dim = 0).data.cpu().numpy()
-    y_score = torch.cat(y_score, dim = 0).data.cpu().numpy()
-    y_pred = np.where(sigmoid(y_score) > 0.5, 1.0, 0.0)
-    
-    roc_list = []
-    
-    for i in range(y_true.shape[1]):
-        #AUC is only defined when there is at least one positive data.
-        if np.sum(y_true[:,i] == 1) > 0 and np.sum(y_true[:,i] == -1) > 0:
-            is_valid = y_true[:,i]**2 > 0
-            roc_list.append(roc_auc_score((y_true[is_valid,i] + 1)/2, y_score[is_valid,i]))
-            #acc_list.append(np.mean((y_true[is_valid, i] +1)/2 == y_pred[is_valid,i]))
-
-    if len(roc_list) < y_true.shape[1]:
-        print("Some target is missing!")
-        print("Missing ratio: %f" %(1 - float(len(roc_list))/y_true.shape[1]))
-
-    return sum(loss)/len(loss), sum(roc_list)/len(roc_list), roc_list, y_pred 
+    result = pd.DataFrame({'auc': test_auc_list})
+    print(result.auc.mean(), result.auc.sem())
 
 
 if __name__ == '__main__':
-    test_roc_list = []
-
-    for seed in range(10):
-        # seed = 0
-        
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
-        np.random.seed(seed)
-
-        train_dataset, valid_dataset, test_dataset = random_scaffold_split(dataset, smiles_list, null_value=0, frac_train=0.8,frac_valid=0.1, frac_test=0.1, seed=seed)
-
-        train_loader = DataLoader(train_dataset, batch_size = 64, shuffle = False, num_workers = num_worker)
-        val_loader = DataLoader(valid_dataset, batch_size = 64, shuffle = False, num_workers = num_worker)
-        test_loader = DataLoader(test_dataset, batch_size = 64, shuffle = False, num_workers = num_worker)
-        
-        model = GNN_graphpred(num_layer, embedding_dim, num_tasks=NUM_TASK, JK='last', drop_ratio=0, graph_pooling='mean').to(device)
-        
-        criterion = nn.BCEWithLogitsLoss(reduction = "none")
-
-        model_param_group = []
-        model_param_group.append({"params": model.gnn.parameters()})
-
-        model_param_group.append({"params": model.graph_pred_linear.parameters(), "lr":0.001*1})
-        optimizer = optim.Adam(model_param_group, lr=0.001, weight_decay=0)
-        print(optimizer)
-        
-        eval_train = 1
-        test_roc_per_epochs = []
-        
-        for epoch in range(1, 30+1):
-            # print("====epoch " + str(epoch))
-            
-            # train(model, device, train_loader, optimizer)
-            train(model, device, train_loader, optimizer)
-
-            # print("====Evaluation")
-            if eval_train:
-                train_loss, train_roc, train_roc_list, train_pred = eval(model, device, train_loader)
-            else:
-                # print("omit the training accuracy computation")
-                train_roc = 0
-            val_loss, val_roc, val_roc_list, val_pred = eval(model, device, val_loader)
-            test_loss, test_roc, test_roc_list_, test_pred = eval(model, device, test_loader)
-            
-            test_roc_per_epochs.append(test_roc)
-
-            print("epoch: %f " %int(epoch),
-                "\ntrain_loss: %f val_loss: %f test_loss: %f" %(train_loss, val_loss, test_loss),
-                "\ntrain_auc: %f val_auc: %f test_auc: %f" %(train_roc, val_roc, test_roc))
-
-        print("Seed:", seed)
-        
-        test_y = []
-        for d, s in enumerate(test_dataset):
-            y_tmp = [0 if i == -1 else i for i in s.y.numpy()]
-            test_y.append(y_tmp[0])
-            
-        pred = [int(i[0]) for i in test_pred]
-        
-        test_roc_list.append(max(test_roc_per_epochs))
-
-    result = pd.DataFrame({'auc': test_roc_list})
-    print(result.auc.mean(), result.auc.sem())
+    main()
