@@ -72,7 +72,7 @@ def lbfgs_inv_hvp_batch(key_list, gradient_dict, weight_dict, history = 2):
     return hv_mat
 
 
-def compute_loo_if(key_list, gradient_dict, weight_dict, history = 2):
+def lbfgs_loo_if(key_list, gradient_dict, weight_dict, history = 2):
     # key_list = ['train_'+str(i) for i in batch.id.cpu().numpy()]
     per_sample_grads = torch.stack([gradient_dict[k][history] for k in key_list])
     
