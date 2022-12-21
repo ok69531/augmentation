@@ -9,7 +9,6 @@ from torch.autograd import grad
 import torch_geometric
 
 
-
 def vec_product(vec1: torch.Tensor, vec2: torch.Tensor) -> torch.Tensor:
   elemwise_prod = 0
   
@@ -41,7 +40,7 @@ def sample_in_batch(device: torch.device,
     y = one_sample.y.to(torch.float32)
     b = torch.zeros(len(x)).to(device).to(torch.int64)
     
-    return (x, edge_attr, edge_index, b, y.to(torch.float32))
+    return (x, edge_attr, edge_index, b, y)
 
 
 def compute_grad(model, 
@@ -96,7 +95,7 @@ def compute_sample_inv_hvp(model,
     current_estimate = grad
     
     for j in range(recursion_depth):
-        hvp_estimate = compute_sample_hvp(model, data, criterion, tuple(current_estimate))
+        hvp_estimate = compute_sample_hvp(model, criterion, data, tuple(current_estimate))
         current_estimate = [a + damping * (b - c) for (a, b, c) in zip(current_estimate, grad, hvp_estimate)]
         
         norm2 = tensor_norm(hvp_estimate)
