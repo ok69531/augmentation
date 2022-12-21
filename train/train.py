@@ -4,7 +4,8 @@ sys.path.append('../')
 import torch
 import numpy as np
 from sklearn.metrics import roc_auc_score
-from module.hvp_influence import hvp_loo_if
+from module.lin_hvp_influence import lin_hvp_loo_if
+from module.all_hvp_influence import all_hvp_loo_if
 from module.lbfgs_influence import (
     compute_grad,
     flat_model_weight,
@@ -61,7 +62,7 @@ def flag_train(model,
         graph_embedding = model.pool(node_embedding + perturb, batch.batch)
         pred = model.graph_pred_linear(graph_embedding)
 
-        y = batch.y.view(pred.shape).to(torch.float64)
+        y = batch.y.view(pred.shape).to(torch.float32)
 
         is_valid = y**2 > 0
         loss_mat = criterion(pred.double(), (y+1)/2)
@@ -114,7 +115,7 @@ def aa_train(model,
         graph_embedding = model.pool(model.gnn(batch.x, batch.edge_index, batch.edge_attr), batch.batch)
         pred = model.graph_pred_linear(graph_embedding + perturb)
 
-        y = batch.y.view(pred.shape).to(torch.float64)
+        y = batch.y.view(pred.shape).to(torch.float32)
 
         #Whether y is non-null or not.
         is_valid = y**2 > 0
@@ -153,7 +154,6 @@ def lin_saa_train(model,
                   loader, 
                   criterion, 
                   optimizer, 
-                  dataset,
                   emb_dim = 300,
                   ratio: float = 0.3, 
                   step_size: float = 0.001, 
@@ -174,13 +174,13 @@ def lin_saa_train(model,
         perturb.requires_grad_()
         
         graph_embedding = model.pool(model.gnn(batch.x, batch.edge_index, batch.edge_attr), batch.batch)
-        loo_influence = hvp_loo_if(model.graph_pred_linear, device, criterion, dataset, batch, damping, recursion_depth, tol)
+        loo_influence = lin_hvp_loo_if(model.graph_pred_linear, criterion, graph_embedding, batch.y, damping, recursion_depth, tol)
         _, topk_idx = torch.topk(loo_influence, k = k, axis = -1)
         
         graph_embedding = graph_embedding[topk_idx, :] + perturb
         pred = model.graph_pred_linear(graph_embedding)
 
-        y = batch.y.view([len(batch.id), 1]).to(torch.float64)[topk_idx, :]
+        y = batch.y.view([len(batch.id), 1]).to(torch.float32)[topk_idx, :]
 
         is_valid = y**2 > 0
         loss_mat = criterion(pred.double(), (y+1)/2)
@@ -239,13 +239,13 @@ def all_saa_train(model,
         perturb.requires_grad_()
         
         graph_embedding = model.pool(model.gnn(batch.x, batch.edge_index, batch.edge_attr), batch.batch)
-        loo_influence = hvp_loo_if(model, device, criterion, dataset, batch, damping, recursion_depth, tol)
+        loo_influence = all_hvp_loo_if(model, device, criterion, dataset, batch, damping, recursion_depth, tol)
         _, topk_idx = torch.topk(loo_influence, k = k, axis = -1)
         
         graph_embedding = graph_embedding[topk_idx, :] + perturb
         pred = model.graph_pred_linear(graph_embedding)
 
-        y = batch.y.view([len(batch.id), 1]).to(torch.float64)[topk_idx, :]
+        y = batch.y.view([len(batch.id), 1]).to(torch.float32)[topk_idx, :]
 
         is_valid = y**2 > 0
         loss_mat = criterion(pred.double(), (y+1)/2)
@@ -338,7 +338,7 @@ def lbfgs_train(model,
         graph_embedding = graph_embedding[topk_idx, :] + perturb
         pred = model.graph_pred_linear(graph_embedding)
 
-        y = batch.y.view([len(batch.id), 1]).to(torch.float64)[topk_idx, :]
+        y = batch.y.view([len(batch.id), 1]).to(torch.float32)[topk_idx, :]
 
         is_valid = y**2 > 0
         loss_mat = criterion(pred.double(), (y+1)/2)
