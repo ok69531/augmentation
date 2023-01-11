@@ -12,11 +12,83 @@ import numpy as np
 import pandas as pd
 
 from model.model import GNN_graphpred
-from train.train import sigmoid, train, lbfgs_train, eval
+from train.train import sigmoid, eval
 from module.common import MoleculeDataset, scaffold_split, random_scaffold_split
-
+from module.lbfgs_influence import *
 
 criterion = nn.BCEWithLogitsLoss(reduction = "none")
+
+def lbfgs_train(model, 
+                device, 
+                loader, 
+                criterion, 
+                optimizer, 
+                dataset, 
+                emb_dim: int = 300, 
+                ratio: float = 0.3, 
+                step_size: float = 0.001, 
+                max_pert: float = 0.01, 
+                history: int = 2):
+    
+    model.train()
+
+    for step, batch in enumerate(loader):
+        batch = batch.to(device)
+        
+        y = batch.y.unsqueeze(1).to(torch.float32)
+        
+        # weight_dict_idx = len(loader)*(epoch-1)+(step+1)
+        key_list = ['train_'+str(i) for i in batch.id.cpu().numpy()]
+        
+        weight_dict = {}
+        gradient_dict = {i: {} for i in key_list}
+        
+        for e in range(history + 1):
+            pred = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
+            
+            is_valid = y**2 > 0
+            loss_mat = criterion(pred.double(), (y+1)/2)
+            loss_mat = torch.where(is_valid, loss_mat, torch.zeros(loss_mat.shape).to(loss_mat.device).to(loss_mat.dtype))
+            
+            # update weight and gradient
+            weight_dict.update({e: flat_model_weight(model)})
+            for k in range(len(batch.id)):
+                per_sample_gradient_dict = {e: flat_grad(compute_grad(model, device, dataset, batch, k, criterion))}
+                gradient_dict[key_list[k]].update(per_sample_gradient_dict)
+
+            optimizer.zero_grad()
+            
+            loss = torch.sum(loss_mat)/torch.sum(is_valid)
+            loss.backward()
+            
+            optimizer.step()
+            
+        
+        k = round(len(batch.id) * ratio)
+        
+        perturb = torch.FloatTensor(k, emb_dim).uniform_(-max_pert, max_pert).to(device)
+        perturb.requires_grad_()
+        
+        graph_embedding = model.pool(model.gnn(batch.x, batch.edge_index, batch.edge_attr), batch.batch)
+        loo_influence = lbfgs_loo_if(key_list, gradient_dict, weight_dict)
+        _, topk_idx = torch.topk(loo_influence, k = k, axis = -1)
+        
+        graph_embedding = graph_embedding[topk_idx, :] + perturb
+        pred = model.graph_pred_linear(graph_embedding)
+
+        y = batch.y.view([len(batch.id), 1]).to(torch.float32)[topk_idx, :]
+
+        is_valid = y**2 > 0
+        loss_mat = criterion(pred.double(), (y+1)/2)
+        loss_mat = torch.where(is_valid, loss_mat, torch.zeros(loss_mat.shape).to(loss_mat.device).to(loss_mat.dtype))
+
+        optimizer.zero_grad()
+        
+        loss = torch.sum(loss_mat)/torch.sum(is_valid)
+        
+        loss.backward()
+        optimizer.step()
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -113,11 +185,8 @@ def main():
         for epoch in range(1, args.epochs + 1):
             print('=== epoch ' + str(epoch))
             
-            if epoch <= args.epochs-10:
-                train(model, device, train_loader, criterion, optimizer)
-            elif epoch > args.epochs-10:
-                lbfgs_train(model, device, train_loader, criterion, optimizer, dataset, 
-                            ratio=args.ratio, step_size=args.step_size, max_pert=args.max_pert, m=args.m, history=args.history)
+            lbfgs_train(model, device, train_loader, criterion, optimizer, dataset, 
+                        ratio=args.ratio, step_size=args.step_size, max_pert=args.max_pert, history=args.history)
             
             if args.eval_train:
                 train_loss, train_auc = eval(model, device, train_loader, criterion)
@@ -128,8 +197,7 @@ def main():
             val_loss, val_auc = eval(model, device, val_loader, criterion)
             test_loss, test_auc = eval(model, device, test_loader, criterion)
             
-            if epoch > args.epochs-10:
-                test_auc_per_epoch.append(test_auc)
+            test_auc_per_epoch.append(test_auc)
             
             print("train_loss: %f val_loss: %f test_loss: %f" %(train_loss, val_loss, test_loss),
                   "\ntrain_auc: %f val_auc: %f test_auc: %f" %(train_auc, val_auc, test_auc))
