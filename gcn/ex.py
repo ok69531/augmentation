@@ -1,4 +1,3 @@
-
 import sys
 sys.path.append('../')
 
@@ -14,23 +13,22 @@ import pandas as pd
 from model.model import GNN_graphpred
 from train.train import sigmoid, eval
 from module.common import MoleculeDataset, scaffold_split, random_scaffold_split
-from module.all_hvp_influence import *
+from module.lin_influence import *
+
 
 criterion = nn.BCEWithLogitsLoss(reduction = "none")
 
-def all_saa_train(model, 
-                  device, 
-                  loader, 
-                  criterion, 
-                  optimizer, 
-                  dataset,
-                  emb_dim = 300,
-                  ratio: float = 0.3, 
-                  step_size: float = 0.001, 
-                  max_pert: float = 0.01, 
-                  damping: float = 0.01,
-                  recursion_depth: int = 10,
-                  tol: float = 1e-6):
+
+def train(model, 
+          device, 
+          loader, 
+          criterion, 
+          optimizer, 
+          emb_dim = 300,
+          ratio: float = 0.3, 
+          step_size: float = 0.001, 
+          max_pert: float = 0.01, 
+          m: int = 3):
     
     model.train()
 
@@ -43,7 +41,7 @@ def all_saa_train(model,
         perturb.requires_grad_()
         
         graph_embedding = model.pool(model.gnn(batch.x, batch.edge_index, batch.edge_attr), batch.batch)
-        loo_influence = all_hvp_loo_if(model, device, criterion, dataset, batch, damping, recursion_depth, tol)
+        loo_influence = compute_loo_if(model.graph_pred_linear, graph_embedding, batch.y, criterion)
         _, topk_idx = torch.topk(loo_influence, k = k, axis = -1)
         
         graph_embedding = graph_embedding[topk_idx, :] + perturb
@@ -57,10 +55,30 @@ def all_saa_train(model,
 
         optimizer.zero_grad()
         loss = torch.sum(loss_mat)/torch.sum(is_valid)
+        loss /= m
+        
+        for _ in range(m - 1):
+            loss.backward()
+            perturb_data = perturb.detach() + step_size * torch.sign(perturb.grad.detach())
+            perturb.data = perturb_data.data
+            perturb.grad[:] = 0
+            
+            tmp_graph_embedding = model.pool(model.gnn(batch.x, batch.edge_index, batch.edge_attr), batch.batch)
+            tmp_graph_embedding = tmp_graph_embedding[topk_idx, :] + perturb
+            
+            tmp_pred = model.graph_pred_linear(tmp_graph_embedding)
+
+            loss = 0
+            loss_mat = criterion(tmp_pred.double(), (y+1)/2)
+            loss += torch.where(is_valid, loss_mat, torch.zeros(loss_mat.shape).to(loss_mat.device).to(loss_mat.dtype))
+            loss = torch.sum(loss_mat)/torch.sum(is_valid)
+            loss /= m
+
+        optimizer.zero_grad()
         loss.backward()
 
         optimizer.step()
-
+      
 
 def main():
     parser = argparse.ArgumentParser()
@@ -79,7 +97,9 @@ def main():
     parser.add_argument('--max_pert', type = float, default = 0.01, help = 'perturbation budget (default = 0.01)')
     parser.add_argument('--step_size', type = float, default = 0.001, help = 'gradient ascent learning rate (default = 0.001)')
     parser.add_argument('--m', type = int, default = 3, help = 'number of update for perturbation (default = 3)')
-    parser.add_argument('--history', type = int, default = 2, help = 'number of steps for lbfgs')
+    parser.add_argument('--damping', type = float, default = 0.01, help = 'learning rate for update inverse hvp')
+    parser.add_argument('--recursion_depth', type = int, default = 10, help = 'number of inverse hvp interations')
+    parser.add_argument('--tol', type = float, default = 1e-6)
     parser.add_argument('--dataset', type = str, default = 'hiv', help = 'bace, bbbp, clintox, hiv, muv, sider, tox21, toxcast')
     parser.add_argument('--split', type = str, default = 'random_scaffold', help = 'scaffold or random_scaffold')
     parser.add_argument('--eval_train', type = int, default = 1, help = 'evaluating training or not')
@@ -156,10 +176,8 @@ def main():
         
         for epoch in range(1, args.epochs + 1):
             print('=== epoch ' + str(epoch))
-            
-            all_saa_train(model, device, train_loader, criterion, optimizer, dataset, emb_dim=args.emb_dim,
-                          ratio=args.ratio, step_size=args.step_size, max_pert=args.max_pert, 
-                          damping = args.damping, recursion_depth = args.recursion_depth, tol = args.tol)
+            train(model, device, train_loader, criterion, optimizer,
+                  emb_dim = args.emb_dim, ratio = args.ratio, step_size = args.step_size, max_pert = args.max_pert, m = args.m)
             
             if args.eval_train:
                 train_loss, train_auc = eval(model, device, train_loader, criterion)
@@ -183,5 +201,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
