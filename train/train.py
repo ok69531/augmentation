@@ -149,7 +149,7 @@ def aa_train(model,
         optimizer.step()
 
 
-def lin_saa_train(model, 
+def lin_hvp_train(model, 
                   device, 
                   loader, 
                   criterion, 
@@ -213,7 +213,7 @@ def lin_saa_train(model,
         optimizer.step()
 
 
-def all_saa_train(model, 
+def all_hvp_train(model, 
                   device, 
                   loader, 
                   criterion, 

@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from model.model import GNN_graphpred
-from train.train import sigmoid, all_saa_train, eval
+from train.train import sigmoid, all_hvp_train, eval
 from module.common import MoleculeDataset, scaffold_split, random_scaffold_split
 
 
@@ -113,7 +113,7 @@ def main():
         
         for epoch in range(1, args.epochs + 1):
             print('=== epoch ' + str(epoch))
-            all_saa_train(model, device, train_loader, criterion, optimizer, dataset,
+            all_hvp_train(model, device, train_loader, criterion, optimizer, dataset,
                           emb_dim = args.emb_dim, ratio = args.ratio, step_size = args.step_size, max_pert = args.max_pert,
                           m = args.m, damping = args.damping, recursion_depth = args.recursion_depth, tol = args.tol)
 
