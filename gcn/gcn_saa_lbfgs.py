@@ -112,7 +112,7 @@ def main():
         
         for epoch in range(1, args.epochs + 1):
             print('=== epoch ' + str(epoch))
-            lbfgs_train(model, device, train_loader, criterion, optimizer, dataset, 
+            lbfgs_train(model, device, train_loader, criterion, optimizer, dataset, emb_dim=args.emb_dim,
                         ratio=args.ratio, step_size=args.step_size, max_pert=args.max_pert, m=args.m, history=args.history)
             
             if args.eval_train:
