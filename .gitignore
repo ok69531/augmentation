@@ -12,4 +12,3 @@ __pycache__/
 SLURM*
 .sh
 **/processed
-**/lin_influence.py
